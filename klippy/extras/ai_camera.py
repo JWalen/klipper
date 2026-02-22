@@ -9,6 +9,7 @@ CAPTURE_COMMANDS = {
     'fswebcam': 'fswebcam -r %s --no-banner -q %s',
     'ffmpeg': 'ffmpeg -y -f v4l2 -video_size %s -i %s -frames:v 1 %s',
     'libcamera-still': 'libcamera-still --width %d --height %d -o %s -t 1 -n',
+    'wget': 'wget -q -O %s %s',
 }
 
 CHECK_TYPES = ['failure', 'first_layer', 'completion', 'general']
@@ -19,6 +20,7 @@ class CameraCapture:
         self.reactor = reactor
         self.camera_device = config.get('camera_device', '/dev/video0')
         self.capture_command = config.get('capture_command', 'fswebcam')
+        self.snapshot_url = config.get('snapshot_url', '')
         self.resolution = config.get('resolution', '1280x720')
         self.capture_dir = config.get('capture_dir', '/tmp/ai_camera')
         self._capture_count = 0
@@ -76,6 +78,8 @@ class CameraCapture:
             height = int(parts[1]) if len(parts) > 1 else 720
             return (CAPTURE_COMMANDS['libcamera-still']
                     % (width, height, filepath))
+        elif self.capture_command == 'wget':
+            return CAPTURE_COMMANDS['wget'] % (filepath, self.snapshot_url)
         raise Exception("Unknown capture command: %s"
                         % (self.capture_command,))
 

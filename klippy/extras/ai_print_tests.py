@@ -43,11 +43,14 @@ class AIPrintTests:
         self.ai_camera = self.printer.lookup_object('ai_camera', None)
     def _get_printer_params(self):
         toolhead = self.printer.lookup_object('toolhead')
+        kin_status = toolhead.get_kinematics().get_status(
+            self.reactor.monotonic())
+        x_max = kin_status['axis_maximum'][0]
+        y_max = kin_status['axis_maximum'][1]
         extruder = self.printer.lookup_object('extruder')
-        x_max = toolhead.axis_maximum[0]
-        y_max = toolhead.axis_maximum[1]
         nozzle_dia = extruder.nozzle_diameter
-        filament_dia = extruder.filament_diameter
+        # filament_diameter is not stored; derive from filament_area
+        filament_dia = 2.0 * math.sqrt(extruder.filament_area / math.pi)
         return {
             'x_max': x_max,
             'y_max': y_max,
