@@ -559,7 +559,7 @@ class AIPrintTests:
         analyze = gcmd.get_int('ANALYZE', 0)
         params = self._get_printer_params()
         probe = self.printer.lookup_object('probe', None)
-        z_offset = '%.3f' % probe.z_offset if probe else 'unknown'
+        z_offset = '%.3f' % probe.get_offsets()[2] if probe else 'unknown'
         gcode_lines = (self._generate_preamble(bed_temp, extruder_temp, params)
                        + self._generate_first_layer_test(params)
                        + self._generate_epilogue())
