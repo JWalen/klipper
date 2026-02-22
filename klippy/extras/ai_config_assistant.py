@@ -3,7 +3,7 @@
 # Copyright (C) 2025  Klipper Contributors
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
-import logging
+import logging, re
 
 
 class AIConfigAssistant:
@@ -26,6 +26,9 @@ class AIConfigAssistant:
         self.gcode.register_command(
             'AI_ASK', self.cmd_AI_ASK,
             desc=self.cmd_AI_ASK_help)
+        self.gcode.register_command(
+            'AI_CONFIG_FIX', self.cmd_AI_CONFIG_FIX,
+            desc=self.cmd_AI_CONFIG_FIX_help)
         # Register webhooks
         webhooks = self.printer.lookup_object('webhooks')
         webhooks.register_endpoint('ai_config_assistant/check',
@@ -34,6 +37,8 @@ class AIConfigAssistant:
                                    self._handle_suggest_request)
         webhooks.register_endpoint('ai_config_assistant/ask',
                                    self._handle_ask_request)
+        webhooks.register_endpoint('ai_config_assistant/fix',
+                                   self._handle_fix_request)
     def _handle_ready(self):
         self.ai_backend = self.printer.lookup_object('ai_backend')
         self.prompt_manager = self.ai_backend.get_prompt_manager()
@@ -108,6 +113,55 @@ class AIConfigAssistant:
             self.gcode.respond_info("AI Answer:\n%s" % (response,))
         except self.printer.command_error as e:
             raise gcmd.error("AI ask failed: %s" % (str(e),))
+    cmd_AI_CONFIG_FIX_help = "AI-proposed config fixes (staged for SAVE_CONFIG)"
+    def cmd_AI_CONFIG_FIX(self, gcmd):
+        if self.ai_backend is None:
+            raise gcmd.error("AI backend not available")
+        section = gcmd.get('SECTION', None)
+        config_text = self._get_config_text(section)
+        if not config_text.strip():
+            if section:
+                raise gcmd.error("Section '%s' not found in config"
+                                 % (section,))
+            raise gcmd.error("No config data available")
+        self.gcode.respond_info("Analyzing configuration for fixes...")
+        prompt = self.prompt_manager.get_prompt('config_fix', config_text)
+        try:
+            response = self.ai_backend.query(prompt)
+        except self.printer.command_error as e:
+            raise gcmd.error("Config fix failed: %s" % (str(e),))
+        changes, reason = self._parse_fix_response(response)
+        if not changes:
+            self.gcode.respond_info(
+                "AI Config Fix: No changes proposed.\n%s" % (reason,))
+            return
+        self._apply_changes(changes)
+        msg_lines = ["AI Config Fix — %d change(s) staged:" % (len(changes),)]
+        for section_name, option, value in changes:
+            msg_lines.append("  [%s] %s = %s" % (section_name, option, value))
+        msg_lines.append("Reason: %s" % (reason,))
+        msg_lines.append("Run SAVE_CONFIG to persist these changes.")
+        self.gcode.respond_info('\n'.join(msg_lines))
+    def _parse_fix_response(self, response):
+        changes = []
+        reason = ''
+        change_re = re.compile(
+            r'^CHANGE:\s*\[([^\]]+)\]\s*(\S+)\s*=\s*(.+)$')
+        for line in response.split('\n'):
+            line = line.strip()
+            m = change_re.match(line)
+            if m:
+                changes.append((m.group(1).strip(), m.group(2).strip(),
+                                m.group(3).strip()))
+            elif line.upper().startswith('REASON:'):
+                reason = line[len('REASON:'):].strip()
+        return changes, reason
+    def _apply_changes(self, changes):
+        configfile = self.printer.lookup_object('configfile')
+        for section_name, option, value in changes:
+            configfile.set(section_name, option, value)
+            logging.info("AI_CONFIG_FIX: staged [%s] %s = %s",
+                         section_name, option, value)
     # Webhooks handlers
     def _handle_check_request(self, web_request):
         if self.ai_backend is None:
@@ -150,6 +204,29 @@ class AIConfigAssistant:
             web_request.send({'answer': response})
         except self.printer.command_error as e:
             raise web_request.error(str(e))
+
+    def _handle_fix_request(self, web_request):
+        if self.ai_backend is None:
+            raise web_request.error("AI backend not available")
+        section = web_request.get_str('section', None)
+        config_text = self._get_config_text(section)
+        if not config_text.strip():
+            raise web_request.error("No config data available")
+        prompt = self.prompt_manager.get_prompt('config_fix', config_text)
+        try:
+            response = self.ai_backend.query(prompt)
+        except self.printer.command_error as e:
+            raise web_request.error(str(e))
+        changes, reason = self._parse_fix_response(response)
+        if not changes:
+            web_request.send({'changes': [], 'reason': reason,
+                              'applied': False})
+            return
+        self._apply_changes(changes)
+        change_list = [{'section': s, 'option': o, 'value': v}
+                       for s, o, v in changes]
+        web_request.send({'changes': change_list, 'reason': reason,
+                          'applied': True})
 
 def load_config(config):
     return AIConfigAssistant(config)
