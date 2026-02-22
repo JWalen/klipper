@@ -256,6 +256,7 @@ class AICamera:
             msg = ("AI Camera detected print failure (%.0f%% confidence): %s"
                    % (confidence * 100, findings))
             self.gcode.respond_info(msg)
+            self.printer.send_event('ai_camera:failure_detected', result)
             if self.failure_action == 'pause':
                 self._pause_print(msg)
             elif self.failure_action == 'alert':

@@ -31,6 +31,18 @@ class AIPrintTests:
         self.gcode.register_command(
             'AI_TEST_SPEED', self.cmd_AI_TEST_SPEED,
             desc=self.cmd_AI_TEST_SPEED_help)
+        self.gcode.register_command(
+            'AI_TEST_TEMP', self.cmd_AI_TEST_TEMP,
+            desc=self.cmd_AI_TEST_TEMP_help)
+        self.gcode.register_command(
+            'AI_TEST_RETRACTION', self.cmd_AI_TEST_RETRACTION,
+            desc=self.cmd_AI_TEST_RETRACTION_help)
+        self.gcode.register_command(
+            'AI_TEST_BRIDGING', self.cmd_AI_TEST_BRIDGING,
+            desc=self.cmd_AI_TEST_BRIDGING_help)
+        self.gcode.register_command(
+            'AI_TEST_OVERHANG', self.cmd_AI_TEST_OVERHANG,
+            desc=self.cmd_AI_TEST_OVERHANG_help)
         # Register webhooks
         webhooks = self.printer.lookup_object('webhooks')
         webhooks.register_endpoint('ai_print_tests/status',
@@ -238,6 +250,186 @@ class AIPrintTests:
             lines.append('G1 X%.1f Y%.1f E%.4f F%d'
                          % (margin + line_length, y, e_total, int(f_val)))
         return lines
+    def _generate_temp_tower(self, params, start_temp, end_temp, step):
+        nozzle_dia = params['nozzle_dia']
+        filament_dia = params['filament_dia']
+        layer_height = 0.28
+        line_width = nozzle_dia * 1.2
+        layers_per_section = 5
+        box_size = 20.0
+        x_center = params['x_max'] / 2.0
+        y_center = params['y_max'] / 2.0
+        x0 = x_center - box_size / 2.0
+        y0 = y_center - box_size / 2.0
+        x1 = x0 + box_size
+        y1 = y0 + box_size
+        temps = list(range(start_temp, end_temp + 1, step))
+        lines = ['; Temperature Tower Test - %d to %d°C in %d°C steps'
+                 % (start_temp, end_temp, step)]
+        e_total = 0.0
+        lines.append('G92 E0')
+        z = 0.0
+        side_e = self._calc_extrusion(box_size, line_width,
+                                       layer_height, filament_dia)
+        for temp_idx, temp in enumerate(temps):
+            lines.append('; Section %d: %d°C' % (temp_idx + 1, temp))
+            lines.append('M104 S%d' % temp)
+            if temp_idx == 0:
+                lines.append('M109 S%d' % temp)
+            for layer in range(layers_per_section):
+                z += layer_height
+                lines.append('G1 Z%.3f F600' % z)
+                lines.append('G1 X%.1f Y%.1f F3000' % (x0, y0))
+                e_total += side_e
+                lines.append('G1 X%.1f Y%.1f E%.4f F1500' % (x1, y0, e_total))
+                e_total += side_e
+                lines.append('G1 X%.1f Y%.1f E%.4f F1500' % (x1, y1, e_total))
+                e_total += side_e
+                lines.append('G1 X%.1f Y%.1f E%.4f F1500' % (x0, y1, e_total))
+                e_total += side_e
+                lines.append('G1 X%.1f Y%.1f E%.4f F1500' % (x0, y0, e_total))
+        return lines
+    def _generate_retraction_test(self, params, start, end, steps):
+        nozzle_dia = params['nozzle_dia']
+        filament_dia = params['filament_dia']
+        layer_height = 0.28
+        line_width = nozzle_dia * 1.2
+        column_size = 10.0
+        column_spacing = 15.0
+        column_layers = 36  # ~10mm tall
+        margin = 30.0
+        lines = ['; Retraction Test - columns with varying retraction lengths']
+        e_total = 0.0
+        lines.append('G92 E0')
+        side_e = self._calc_extrusion(column_size, line_width,
+                                       layer_height, filament_dia)
+        for layer in range(column_layers):
+            z = (layer + 1) * layer_height
+            lines.append('G1 Z%.3f F600' % z)
+            for i in range(steps):
+                if steps > 1:
+                    retract_len = start + (end - start) * i / (steps - 1)
+                else:
+                    retract_len = start
+                if layer == 0:
+                    lines.append('; Column %d: retract %.2fmm'
+                                 % (i + 1, retract_len))
+                lines.append('SET_RETRACTION RETRACT_LENGTH=%.3f'
+                             % retract_len)
+                x_base = margin + i * column_spacing
+                y_base = margin
+                lines.append('G1 X%.1f Y%.1f F3000' % (x_base, y_base))
+                e_total += side_e
+                lines.append('G1 X%.1f Y%.1f E%.4f F1500'
+                             % (x_base + column_size, y_base, e_total))
+                e_total += side_e
+                lines.append('G1 X%.1f Y%.1f E%.4f F1500'
+                             % (x_base + column_size,
+                                y_base + column_size, e_total))
+                e_total += side_e
+                lines.append('G1 X%.1f Y%.1f E%.4f F1500'
+                             % (x_base, y_base + column_size, e_total))
+                e_total += side_e
+                lines.append('G1 X%.1f Y%.1f E%.4f F1500'
+                             % (x_base, y_base, e_total))
+        lines.append('SET_RETRACTION RETRACT_LENGTH=0.9')
+        return lines
+    def _generate_bridging_test(self, params, spans):
+        nozzle_dia = params['nozzle_dia']
+        filament_dia = params['filament_dia']
+        layer_height = 0.28
+        line_width = nozzle_dia * 1.2
+        pillar_size = 10.0
+        pillar_layers = 18  # ~5mm tall
+        bridge_lines = 5
+        margin = 30.0
+        y_spacing = 25.0
+        lines = ['; Bridging Test - bridges at increasing spans']
+        e_total = 0.0
+        lines.append('G92 E0')
+        side_e = self._calc_extrusion(pillar_size, line_width,
+                                       layer_height, filament_dia)
+        # Phase 1: Build support pillars
+        for layer in range(pillar_layers):
+            z = (layer + 1) * layer_height
+            lines.append('G1 Z%.3f F600' % z)
+            for s_idx, span in enumerate(spans):
+                y_base = margin + s_idx * y_spacing
+                for pillar_x in [margin, margin + pillar_size + span]:
+                    px0 = pillar_x
+                    py0 = y_base
+                    px1 = pillar_x + pillar_size
+                    py1 = y_base + pillar_size
+                    lines.append('G1 X%.1f Y%.1f F3000' % (px0, py0))
+                    e_total += side_e
+                    lines.append('G1 X%.1f Y%.1f E%.4f F1500'
+                                 % (px1, py0, e_total))
+                    e_total += side_e
+                    lines.append('G1 X%.1f Y%.1f E%.4f F1500'
+                                 % (px1, py1, e_total))
+                    e_total += side_e
+                    lines.append('G1 X%.1f Y%.1f E%.4f F1500'
+                                 % (px0, py1, e_total))
+                    e_total += side_e
+                    lines.append('G1 X%.1f Y%.1f E%.4f F1500'
+                                 % (px0, py0, e_total))
+        # Phase 2: Bridge lines
+        z = (pillar_layers + 1) * layer_height
+        lines.append('G1 Z%.3f F600' % z)
+        for s_idx, span in enumerate(spans):
+            y_base = margin + s_idx * y_spacing
+            bridge_start = margin + pillar_size
+            bridge_end = margin + pillar_size + span
+            lines.append('; Bridge span %.0fmm' % span)
+            for j in range(bridge_lines):
+                y = y_base + 2.0 + j * (pillar_size - 4.0) / max(
+                    bridge_lines - 1, 1)
+                e_seg = self._calc_extrusion(span, line_width,
+                                             layer_height, filament_dia)
+                lines.append('G1 X%.1f Y%.1f F3000' % (bridge_start, y))
+                e_total += e_seg
+                lines.append('G1 X%.1f Y%.1f E%.4f F1200'
+                             % (bridge_end, y, e_total))
+        return lines
+    def _generate_overhang_test(self, params, angles):
+        nozzle_dia = params['nozzle_dia']
+        filament_dia = params['filament_dia']
+        layer_height = 0.28
+        line_width = nozzle_dia * 1.2
+        total_layers = 50  # ~14mm
+        base_layers = 10
+        section_width = 20.0
+        margin = 40.0
+        lines = ['; Overhang Test - walls at increasing overhang angles']
+        e_total = 0.0
+        lines.append('G92 E0')
+        seg_e = self._calc_extrusion(section_width, line_width,
+                                      layer_height, filament_dia)
+        for layer in range(total_layers):
+            z = (layer + 1) * layer_height
+            lines.append('G1 Z%.3f F600' % z)
+            for a_idx, angle_deg in enumerate(angles):
+                y_base = margin + a_idx * section_width
+                wall_x = margin
+                if layer >= base_layers:
+                    angle_rad = math.radians(angle_deg)
+                    overhang_layers = layer - base_layers
+                    x_offset = overhang_layers * layer_height / math.tan(
+                        angle_rad)
+                    wall_x = margin - x_offset
+                if layer == base_layers:
+                    lines.append('; Overhang %d°' % angle_deg)
+                # Overhang wall
+                lines.append('G1 X%.1f Y%.1f F3000' % (wall_x, y_base))
+                e_total += seg_e
+                lines.append('G1 X%.1f Y%.1f E%.4f F1500'
+                             % (wall_x, y_base + section_width, e_total))
+                # Reference wall (vertical)
+                lines.append('G1 X%.1f Y%.1f F3000' % (margin, y_base))
+                e_total += seg_e
+                lines.append('G1 X%.1f Y%.1f E%.4f F1500'
+                             % (margin, y_base + section_width, e_total))
+        return lines
     def _generate_epilogue(self):
         return [
             '; Epilogue',
@@ -422,13 +614,77 @@ class AIPrintTests:
                        + self._generate_epilogue())
         self._run_test(gcmd, 'speed', gcode_lines, analyze,
                        (str(int(start)), str(int(end)), str(steps)))
+    cmd_AI_TEST_TEMP_help = "Print temperature tower calibration test"
+    def cmd_AI_TEST_TEMP(self, gcmd):
+        if self.ai_backend is None:
+            raise gcmd.error("AI backend not available")
+        bed_temp = gcmd.get_int('BED_TEMP', 60)
+        start_temp = gcmd.get_int('START_TEMP', 190)
+        end_temp = gcmd.get_int('END_TEMP', 230)
+        step = gcmd.get_int('STEP', 5)
+        analyze = gcmd.get_int('ANALYZE', 0)
+        params = self._get_printer_params()
+        gcode_lines = (self._generate_preamble(bed_temp, start_temp, params)
+                       + self._generate_temp_tower(params, start_temp,
+                                                   end_temp, step)
+                       + self._generate_epilogue())
+        self._run_test(gcmd, 'temp_tower', gcode_lines, analyze,
+                       (str(start_temp), str(end_temp), str(step)))
+    cmd_AI_TEST_RETRACTION_help = "Print retraction calibration test"
+    def cmd_AI_TEST_RETRACTION(self, gcmd):
+        if self.ai_backend is None:
+            raise gcmd.error("AI backend not available")
+        bed_temp = gcmd.get_int('BED_TEMP', 60)
+        extruder_temp = gcmd.get_int('EXTRUDER_TEMP', 200)
+        analyze = gcmd.get_int('ANALYZE', 0)
+        start = gcmd.get_float('START', 0.2)
+        end = gcmd.get_float('END', 2.0)
+        steps = gcmd.get_int('STEPS', 5)
+        params = self._get_printer_params()
+        gcode_lines = (self._generate_preamble(bed_temp, extruder_temp, params)
+                       + self._generate_retraction_test(params, start,
+                                                        end, steps)
+                       + self._generate_epilogue())
+        self._run_test(gcmd, 'retraction', gcode_lines, analyze,
+                       (str(start), str(end), str(steps)))
+    cmd_AI_TEST_BRIDGING_help = "Print bridging calibration test"
+    def cmd_AI_TEST_BRIDGING(self, gcmd):
+        if self.ai_backend is None:
+            raise gcmd.error("AI backend not available")
+        bed_temp = gcmd.get_int('BED_TEMP', 60)
+        extruder_temp = gcmd.get_int('EXTRUDER_TEMP', 200)
+        analyze = gcmd.get_int('ANALYZE', 0)
+        spans_str = gcmd.get('SPANS', '20,40,60,80')
+        spans = [float(s.strip()) for s in spans_str.split(',')]
+        params = self._get_printer_params()
+        gcode_lines = (self._generate_preamble(bed_temp, extruder_temp, params)
+                       + self._generate_bridging_test(params, spans)
+                       + self._generate_epilogue())
+        self._run_test(gcmd, 'bridging', gcode_lines, analyze,
+                       (spans_str,))
+    cmd_AI_TEST_OVERHANG_help = "Print overhang calibration test"
+    def cmd_AI_TEST_OVERHANG(self, gcmd):
+        if self.ai_backend is None:
+            raise gcmd.error("AI backend not available")
+        bed_temp = gcmd.get_int('BED_TEMP', 60)
+        extruder_temp = gcmd.get_int('EXTRUDER_TEMP', 200)
+        analyze = gcmd.get_int('ANALYZE', 0)
+        angles_str = gcmd.get('ANGLES', '15,30,45,60,75')
+        angles = [int(a.strip()) for a in angles_str.split(',')]
+        params = self._get_printer_params()
+        gcode_lines = (self._generate_preamble(bed_temp, extruder_temp, params)
+                       + self._generate_overhang_test(params, angles)
+                       + self._generate_epilogue())
+        self._run_test(gcmd, 'overhang', gcode_lines, analyze,
+                       (angles_str,))
     # Webhook handlers
     def _handle_status_request(self, web_request):
         eventtime = self.reactor.monotonic()
         web_request.send(self.get_status(eventtime))
     def _handle_run_request(self, web_request):
         test_type = web_request.get_str('type')
-        valid_types = ('first_layer', 'flow', 'pa', 'speed')
+        valid_types = ('first_layer', 'flow', 'pa', 'speed',
+                       'temp', 'retraction', 'bridging', 'overhang')
         if test_type not in valid_types:
             raise web_request.error(
                 "Invalid test type '%s'. Must be one of: %s"
@@ -442,9 +698,10 @@ class AIPrintTests:
         # Build the G-code command string and run via gcode
         cmd_parts = ['AI_TEST_%s' % test_type.upper(),
                      'BED_TEMP=%d' % bed_temp,
-                     'EXTRUDER_TEMP=%d' % extruder_temp,
                      'ANALYZE=%d' % analyze]
-        if test_type in ('flow', 'pa', 'speed'):
+        if test_type != 'temp':
+            cmd_parts.append('EXTRUDER_TEMP=%d' % extruder_temp)
+        if test_type in ('flow', 'pa', 'speed', 'retraction'):
             start = web_request.get_float('start', None)
             end = web_request.get_float('end', None)
             steps = web_request.get_int('steps', None)
@@ -454,6 +711,24 @@ class AIPrintTests:
                 cmd_parts.append('END=%.4f' % end)
             if steps is not None:
                 cmd_parts.append('STEPS=%d' % steps)
+        if test_type == 'temp':
+            start_temp = web_request.get_int('start_temp', None)
+            end_temp = web_request.get_int('end_temp', None)
+            step = web_request.get_int('step', None)
+            if start_temp is not None:
+                cmd_parts.append('START_TEMP=%d' % start_temp)
+            if end_temp is not None:
+                cmd_parts.append('END_TEMP=%d' % end_temp)
+            if step is not None:
+                cmd_parts.append('STEP=%d' % step)
+        if test_type == 'bridging':
+            spans = web_request.get_str('spans', None)
+            if spans is not None:
+                cmd_parts.append('SPANS=%s' % spans)
+        if test_type == 'overhang':
+            angles = web_request.get_str('angles', None)
+            if angles is not None:
+                cmd_parts.append('ANGLES=%s' % angles)
         cmd = ' '.join(cmd_parts)
         try:
             self.gcode.run_script_from_command(cmd)
